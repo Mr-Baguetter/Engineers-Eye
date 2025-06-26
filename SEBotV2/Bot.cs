@@ -18,6 +18,7 @@ namespace SEBotV2
         private ConfigService _configService;
         private ServerService _serverService;
         private List<ICommand> _commands;
+        internal Version version { get; set; } = new(0, 2);
 
         public static async Task Main(string[] args)
         {
