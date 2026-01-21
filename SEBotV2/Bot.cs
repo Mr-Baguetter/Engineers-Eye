@@ -1,187 +1,531 @@
-﻿using Discord;
+﻿using System.Diagnostics;
+using Discord;
 using Discord.WebSocket;
-using SEBotV2.API.Interfaces;
-using SEBotV2.API.Services;
-using SEBotV2.Commands.User;
-using SpaceEngineersDiscordBot.Commands;
+using Okolni.Source.Query.Responses;
+using SEBotV2.API.Helpers;
+using SEBotV2.API.Net;
+using SEBotV2.Commands;
+using SEBotV2.Commands.Console;
+using SEBotV2.Commands.Text;
+using static SEBotV2.API.Helpers.ServerManager;
 
+// & "C:\Program Files\Microsoft Visual Studio\18\Insiders\MSBuild\Current\Bin\MSBuild.exe" SEBotV2.csproj
 namespace SEBotV2
 {
-    public class Program
+    public class Bot
     {
-        private const string CONFIG_FILE = "config.json";
+        public class ServerPingInfo
+        {
+            public string IP { get; set; }
+            public int Port { get; set; }
+        }
 
-        private DiscordSocketClient _client;
-        private HttpClient _httpClient;
-        private Timer _updateTimer;
-        private Config _config;
-        private ConfigService _configService;
-        private ServerService _serverService;
-        private List<ICommand> _commands;
-        internal Version version { get; set; } = new(0, 2);
+        private CancellationTokenSource? _mainCts;
+        private Task? _mainLoopTask;
+
+        private CancellationTokenSource? _statusCts;
+        private Task? _statusLoopTask;
+        private readonly TimeSpan _statusInterval = TimeSpan.FromMilliseconds(1000 * 30);
+
+        private readonly SemaphoreSlim _statusSemaphore = new(1, 1);
+
+        public static event Action<ServerInfo, ServerInfo, Player>? OnPlayerJoined;
+        public static event Action<ServerInfo, ServerInfo, Player>? OnPlayerLeft;
+
+        public DiscordShardedClient _client;
+        public HttpClient _httpClient;
+        public Timer _updateTimer;
+        internal Version version { get; set; } = new(1, 0, 0);
+        public static Bot Instance { get; set; }
+        internal CommandHandler CommandHandler = new();
+        internal ConsoleCommandHandler ConsoleCommandHandler;
 
         public static async Task Main(string[] args)
         {
-            var program = new Program();
-            await program.RunAsync();
-        }
+            bool hasRestartArg = args?.Any(a => a.StartsWith("restarted:", StringComparison.OrdinalIgnoreCase)) ?? false;
 
-        public async Task RunAsync()
-        {
-            _configService = new ConfigService(CONFIG_FILE);
-            _httpClient = new HttpClient();
-
-            _config = await _configService.LoadOrCreateConfigAsync();
-
-            if (!_config.IsValid())
+            if (Process.GetProcessesByName("SEBotV2").Length > 1 && !hasRestartArg)
             {
-                Console.WriteLine("Please fill out the configuration file (config.json) and restart the bot.");
-                Console.WriteLine("Press any key to exit...");
-                Console.ReadKey();
+                Console.WriteLine("Another instance of SEBotV2 is already running. Exiting...");
                 return;
             }
 
-            _serverService = new ServerService(_httpClient, _config);
+            Bot bot = new();
+            await bot.RunAsync(args);
+        }
 
-            var discordConfig = new DiscordSocketConfig
+        public async Task RunAsync(string[] args = null)
+        {
+#region Configs
+            await ConfigManager.AddTypeAsync<string>("BotToken", default);
+            await ConfigManager.AddTypeAsync<Dictionary<ulong, ServerPingInfo>>("PingInfo", default);
+            await ConfigManager.AddTypeAsync<float>("UpdateIntervalMs", default);
+            await ConfigManager.AddTypeAsync<Dictionary<ulong, ulong>>("LogChannel", default);
+            await ConfigManager.AddTypeAsync<bool>("Debug", true);
+            await ConfigManager.AddTypeAsync<int>("PlayerLeaveNotificationAutoRemoveTime", 3600);
+            await ConfigManager.AddTypeAsync<int>("PlayerLeaveNotificationCheckInterval", 30);
+            await ConfigManager.AddTypeAsync<ulong>("OwnerUserId", default);
+#endregion
+
+            await LogManager.Init();
+
+            _httpClient = new HttpClient();
+            Instance = this;
+            DiscordSocketConfig discordConfig = new()
             {
-                GatewayIntents = GatewayIntents.Guilds
+                GatewayIntents = GatewayIntents.All
             };
 
-            _client = new DiscordSocketClient(discordConfig);
-
-            InitializeCommands();
-
+            _client = new DiscordShardedClient(discordConfig);
             _client.Log += LogAsync;
-            _client.Ready += ReadyAsync;
-            _client.SlashCommandExecuted += SlashCommandHandler;
+            _client.ShardReady += ReadyAsync;
+            _client.SlashCommandExecuted += OnSlashCommand;
 
             try
             {
-                await _client.LoginAsync(TokenType.Bot, _config.DiscordToken);
+                await _client.LoginAsync(TokenType.Bot, await ConfigManager.LoadAsync<string>("BotToken") ?? "");
                 await _client.StartAsync();
 
+                LogManager.Debug($"Total shards: {_client.Shards.Count}");
+
                 Console.CancelKeyPress += OnCancelKeyPress;
-                Console.WriteLine("Bot is running. Press Ctrl+C to stop.");
+                LogManager.Info("Bot is running. Press Ctrl+C to stop.");
+                CommandHandler.GetAndAddAllCommands();
+                await TextCommandHandler.Register();
+                TextCommandHandler.RegisterAllCommands();
+                await PlayerManager.Register();
+                await PlayerLeaveNotificationManager.Register();
+                TranslationManager.Init();
+                await UpdateManager.Init();
+
+                _mainCts = new CancellationTokenSource();
+                _mainLoopTask = Task.Run(() => RunUpdateLoopAsync(_mainCts.Token), CancellationToken.None);
+
+                if (args.Any(a => a.StartsWith("restarted:", StringComparison.OrdinalIgnoreCase)))
+                {
+                    string arg = args.First(a => a.StartsWith("restarted:", StringComparison.OrdinalIgnoreCase));
+                    if (ulong.TryParse(arg.Substring("restarted:".Length), out ulong userId))
+                    {
+                        SocketUser user = _client.GetUser(userId);
+                        if (user != null)
+                        {
+                            LogManager.Info($"Successfully restarted by {user.GlobalName}");
+                        }
+                        else
+                            LogManager.Info($"Successfully restarted by null user");
+                    }
+                }
+
                 await Task.Delay(-1);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Failed to start bot: {ex.Message}");
-                Console.WriteLine("Please check your Discord token in config.json");
-                Console.WriteLine("Press any key to exit...");
+                LogManager.Warn($"Failed to start bot: {ex.Message}");
+                LogManager.Warn("Please check your Discord token in config.json");
+                LogManager.Warn("Press any key to exit...");
                 Console.ReadKey();
             }
         }
 
-        private void InitializeCommands()
+        private async Task RunUpdateLoopAsync(CancellationToken token)
         {
-            _commands = new List<ICommand>
+            try
             {
-                new SetServerCommand(_configService, _serverService),
-                new StatusCommand(_serverService, _config),
-            };
+                while (!token.IsCancellationRequested)
+                {
+                    try
+                    {
+                        await UpdateServerInfo();
+                    }
+                    catch (OperationCanceledException) when (token.IsCancellationRequested)
+                    {
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        LogManager.Error($"Error updating server info: {ex}");
+                    }
+
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(5), token);
+                    }
+                    catch (TaskCanceledException)
+                    {
+                        break;
+                    }
+                }
+            }
+            finally
+            {
+                LogManager.Info("Main update loop stopped.");
+            }
         }
 
-        private async Task ReadyAsync()
+        private static async Task UpdateServerInfo()
         {
-            Console.WriteLine($"Bot logged in as {_client.CurrentUser.Username}#{_client.CurrentUser.Discriminator}");
-            Console.WriteLine($"Monitoring Space Engineers server at {_config.ServerIp}:{_config.ServerPort}");
+            Dictionary<ulong, ServerPingInfo> pingInfo = await ConfigManager.LoadAsync<Dictionary<ulong, ServerPingInfo>>("PingInfo") ?? [];
+            foreach (ulong id in pingInfo.Keys.ToArray())
+            {
+                ServerInfo old = ServerManager.ServerInfoByGuildId.ContainsKey(id) ? ServerManager.ServerInfoByGuildId[id] : null;
+                ServerInfo info = await ServerManager.QueryServer(id) ?? new();
+                old ??= new();
 
-            await RegisterSlashCommandsAsync();
+                List<string> playerNames = [];
+                foreach (Player player in info.Players)
+                    playerNames.Add(player.Name);
+
+                List<string> oldPlayerNames = [];
+                foreach (Player player in old.Players)
+                    oldPlayerNames.Add(player.Name);
+
+                if (old != null && !oldPlayerNames.SequenceEqual(playerNames))
+                {
+                    LogManager.Info($"Server {info.Name} player list changed!");
+                    List<Player> newPlayers = info.Players.Where(p => old.Players.All(op => op.Name != p.Name)).ToList();
+                    foreach (Player player in newPlayers)
+                    {
+                        if (!string.IsNullOrWhiteSpace(player.Name) && player.Name.Trim().Length != 0 && player.Name != "")
+                        {
+                            Logging.LogToFile($"New player joined: {player.Name}");
+                            LogManager.Info($"New player joined: {player.Name}");
+                            OnPlayerJoined?.Invoke(old, info, player);
+                        }
+                        else
+                            LogManager.Debug($"Unknown player left the server");
+                    }
+
+                    List<Player> leftPlayers = old.Players.Where(op => info.Players.All(p => p.Name != op.Name)).ToList();
+                    foreach (Player player in leftPlayers)
+                    {
+                        if (!string.IsNullOrWhiteSpace(player.Name) && player.Name.Trim().Length != 0 && player.Name != "")
+                        {
+                            Logging.LogToFile($"Player left: {player.Name}");
+                            LogManager.Info($"Player left: {player.Name}");
+                            OnPlayerLeft?.Invoke(old, info, player);
+                        }
+                        else
+                            LogManager.Debug($"Unknown player left the server");
+                    }
+                }
+
+                ServerManager.ServerInfoByGuildId[id] = info;
+                LogManager.Info($"Server {info.Name}: {info.PlayerCount}/{info.MaxPlayers} players online");
+                LogManager.Info($"Server {info.Name}: {string.Join(", ", playerNames)}");
+            }
+        }
+
+        private Task OnSlashCommand(SocketSlashCommand command)
+        {
+            _ = Task.Run(async () =>
+            {
+                try 
+                {
+                    await CommandHandler.ExecuteAsync(command);
+                }
+                catch (Exception ex)
+                {
+                    LogManager.Error($"Background command error: {ex}");
+
+                    try
+                    {
+                        if (!command.HasResponded)
+                            await command.RespondAsync("An internal error occurred while executing the command.", ephemeral: true);
+                        else
+                            await command.FollowupAsync("An internal error occurred while executing the command.", ephemeral: true);
+                    }
+                    catch (Exception inner)
+                    {
+                        LogManager.Error($"Failed to send error response for command '{command.Data.Name}': {inner}");
+                    }
+                }
+            });
+
+            return Task.CompletedTask;
+        }
+
+        private async Task ReadyAsync(DiscordSocketClient client)
+        {
+            LogManager.Info($"Bot logged in as {client.CurrentUser.Username}");
+
+            ConsoleCommandHandler = new();
+            ConsoleCommandHandler.Start();
+            foreach (SocketGuild guild in _client.Guilds.ToArray())
+            {
+                LogManager.Debug($"{guild.Name}");
+                await CommandHandler.RegisterCommandsWithDiscordAsync(guild.Id);
+            }
+
             await UpdateBotStatusAsync();
-
-            _updateTimer = new Timer(async _ => await UpdateBotStatusAsync(), null, TimeSpan.Zero, TimeSpan.FromMilliseconds(_config.UpdateIntervalMs));
+            StartStatusLoop();
         }
 
-        private async Task RegisterSlashCommandsAsync()
+        private void StartStatusLoop()
         {
+            if (_statusLoopTask != null && !_statusLoopTask.IsCompleted) 
+                return;
+
+            _statusCts = new CancellationTokenSource();
+            CancellationToken token = _statusCts.Token;
+            _statusLoopTask = Task.Run(async () =>
+            {
+                try
+                {
+                    while (!token.IsCancellationRequested)
+                    {
+                        await _statusSemaphore.WaitAsync(token);
+                        try
+                        {
+                            if (_client?.CurrentUser == null)
+                                break;
+
+                            try
+                            {
+                                await UpdateBotStatusAsync();
+                            }
+                            catch (InvalidOperationException ioe)
+                            {
+                                LogManager.Warn($"Status update aborted: {ioe.Message}");
+                                break;
+                            }
+                            catch (OperationCanceledException) when (token.IsCancellationRequested)
+                            {
+                                break;
+                            }
+                            catch (Exception ex)
+                            {
+                                LogManager.Error($"Unhandled error while updating status: {ex}");
+                            }
+                        }
+                        finally
+                        {
+                            _statusSemaphore.Release();
+                        }
+
+                        try
+                        {
+                            await Task.Delay(_statusInterval, token);
+                        }
+                        catch (TaskCanceledException)
+                        {
+                            break;
+                        }
+                    }
+                }
+                finally
+                {
+                    LogManager.Info("Status loop stopped.");
+                }
+            }, token);
+        }
+
+        private async Task StopStatusLoopAsync()
+        {
+            if (_statusCts == null)
+                return;
+
             try
             {
-                foreach (var command in _commands)
-                {
-                    await _client.CreateGlobalApplicationCommandAsync(command.Build());
-                }
+                _statusCts.Cancel();
 
-                Console.WriteLine("Slash commands registered successfully");
+                if (_statusLoopTask != null)
+                    await Task.WhenAny(_statusLoopTask, Task.Delay(TimeSpan.FromSeconds(5)));
+
+                await _statusSemaphore.WaitAsync(TimeSpan.FromSeconds(2));
+                _statusSemaphore.Release();
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Failed to register slash commands: {ex.Message}");
+                LogManager.Warn($"Error stopping status loop: {ex}");
             }
-        }
-
-        private async Task SlashCommandHandler(SocketSlashCommand command)
-        {
-            try
+            finally
             {
-                var slashCommand = _commands.Find(c => c.Name == command.Data.Name);
-                if (slashCommand != null)
-                {
-                    await slashCommand.ExecuteAsync(command);
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error handling slash command: {ex.Message}");
-
-                if (!command.HasResponded)
-                {
-                    await command.RespondAsync("An error occurred while processing the command.", ephemeral: true);
-                }
+                _statusCts.Dispose();
+                _statusCts = null;
+                _statusLoopTask = null;
             }
         }
 
         private async Task UpdateBotStatusAsync()
         {
+            if (_client?.CurrentUser == null)
+                return;
+
             try
             {
-                var serverInfo = await _serverService.GetServerInfoAsync();
+                Dictionary<ulong, ServerPingInfo> kvp = await ConfigManager.LoadAsync<Dictionary<ulong, ServerPingInfo>>("PingInfo") ?? [];
+                ulong id = kvp?.Keys.FirstOrDefault() ?? 123456789012345678;
+                ServerInfo serverInfo = await ServerManager.QueryServer(id);
 
                 string statusText;
                 ActivityType activityType = ActivityType.Watching;
                 UserStatus userStatus;
 
-                if (serverInfo.IsOnline)
+                if (serverInfo is not null)
                 {
-                    statusText = $"{serverInfo.Players}/{serverInfo.MaxPlayers} players";
+                    statusText = $"{serverInfo.PlayerCount}/{serverInfo.MaxPlayers} players";
                     userStatus = UserStatus.Online;
-                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Server: {serverInfo.Name} - {statusText}");
+                    LogManager.Info($"[{DateTime.Now:HH:mm:ss}] Server: {serverInfo.Name} - {statusText}");
                 }
                 else
                 {
                     statusText = "Server Offline";
                     activityType = ActivityType.CustomStatus;
                     userStatus = UserStatus.DoNotDisturb;
-                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Server appears to be offline");
+                    LogManager.Info($"[{DateTime.Now:HH:mm:ss}] Server appears to be offline");
                 }
 
-                await _client.SetActivityAsync(new Game(statusText, activityType));
-                await _client.SetStatusAsync(userStatus);
+                if (_client?.CurrentUser != null)
+                {
+                    await _client.SetCustomStatusAsync(statusText);
+                    await _client.SetStatusAsync(userStatus);
+                }
+            }
+            catch (InvalidOperationException)
+            {
+                LogManager.Warn("Attempted to update status while client was not logged in.");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error updating bot status: {ex.Message}");
-
-                await _client.SetActivityAsync(new Game("Connection Error", ActivityType.CustomStatus));
-                await _client.SetStatusAsync(UserStatus.DoNotDisturb);
+                LogManager.Warn($"Error updating bot status: {ex.Message}");
+                try
+                {
+                    if (_client?.CurrentUser != null)
+                    {
+                        await _client.SetCustomStatusAsync("Connection Error");
+                        await _client.SetStatusAsync(UserStatus.DoNotDisturb);
+                    }
+                }
+                catch { }
             }
         }
 
-        private static Task LogAsync(LogMessage log)
+        public async Task ShutdownAsync()
         {
-            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] [{log.Severity}] {log.Source}: {log.Message}");
+            LogManager.Info("Shutting down bot...");
+
+            ConsoleCommandHandler.Stop();
+            await StopStatusLoopAsync().ConfigureAwait(false);
+            await UpdateManager.Stop().ConfigureAwait(false);
+            LogManager.SaveLogs();
+            await PlayerLeaveNotificationManager.StopCheckTimeLoop().ConfigureAwait(false);
+            if (_mainCts != null)
+            {
+                try
+                {
+                    _mainCts.Cancel();
+                    if (_mainLoopTask != null)
+                        await Task.WhenAny(_mainLoopTask, Task.Delay(TimeSpan.FromSeconds(5)));
+                }
+                catch (Exception ex)
+                {
+                    LogManager.Warn($"Error stopping main loop: {ex}");
+                }
+                finally
+                {
+                    _mainCts.Dispose();
+                    _mainCts = null;
+                    _mainLoopTask = null;
+                }
+            }
+
+            try { _httpClient?.Dispose(); } catch { }
+            try
+            {
+                if (_client == null)
+                {
+                    LogManager.Debug("Discord client is null, skipping logout/stop.");
+                }
+                else
+                {
+                    if (_client is DiscordShardedClient sharded)
+                    {
+                        if (sharded.Shards != null && sharded.Shards.Any())
+                        {
+                            LogManager.Info($"Stopping {sharded.Shards.Count} shard(s)...");
+
+                            IEnumerable<Task> logoutTasks = sharded.Shards.Select(async shardClient =>
+                            {
+                                try
+                                {
+                                    if (shardClient.CurrentUser != null)
+                                        await shardClient.LogoutAsync().ConfigureAwait(false);
+                                }
+                                catch (Exception ex)
+                                {
+                                    LogManager.Warn($"Error logging out shard {shardClient.ShardId}: {ex.Message}");
+                                }
+                            });
+                            await Task.WhenAll(logoutTasks).ConfigureAwait(false);
+
+                            IEnumerable<Task> stopTasks = sharded.Shards.Select(async shardClient =>
+                            {
+                                try
+                                {
+                                    await shardClient.StopAsync().ConfigureAwait(false);
+                                }
+                                catch (Exception ex)
+                                {
+                                    LogManager.Warn($"Error stopping shard {shardClient.ShardId}: {ex.Message}");
+                                }
+                            });
+                            await Task.WhenAll(stopTasks).ConfigureAwait(false);
+                        }
+                        else
+                        {
+                            LogManager.Warn("Sharded client has no shards attempting guarded StopAsync/LogoutAsync on sharded client.");
+                            try { await _client.LogoutAsync().ConfigureAwait(false); } catch (Exception ex) { LogManager.Warn($"Logout on sharded client failed: {ex.Message}"); }
+                            try { await _client.StopAsync().ConfigureAwait(false); } catch (Exception ex) { LogManager.Warn($"Stop on sharded client failed: {ex.Message}"); }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogManager.Warn($"Error while logging out Discord client: {ex}");
+            }
+            finally
+            {
+                try { _client?.Dispose(); } catch { }
+            }
+            LogManager.Info("Shutdown complete.");
+        }
+
+        private Task LogAsync(LogMessage msg)
+        {
+            if (string.IsNullOrWhiteSpace(msg.Message))
+                return Task.CompletedTask;
+
+            switch (msg.Severity)
+            {
+                case LogSeverity.Debug:
+                    LogManager.Debug(msg.Message);
+                    break;
+                case LogSeverity.Info:
+                    LogManager.Info(msg.Message);
+                    break;
+                case LogSeverity.Warning:
+                    LogManager.Warn(msg.Message);
+                    break;
+                case LogSeverity.Error:
+                    LogManager.Error(msg.Message);
+                    break;
+                case LogSeverity.Critical:
+                    LogManager.Critical(msg.Message);
+                    break;
+                default:
+                    LogManager.Info(msg.Message);
+                    break;
+            }
+
             return Task.CompletedTask;
         }
 
+
         private void OnCancelKeyPress(object sender, ConsoleCancelEventArgs e)
         {
-            Console.WriteLine("\nShutting down bot...");
-
-            _updateTimer?.Dispose();
-            _httpClient?.Dispose();
-            _client?.LogoutAsync().GetAwaiter().GetResult();
-            _client?.Dispose();
+            e.Cancel = true;
+            ShutdownAsync().GetAwaiter().GetResult();
 
             Environment.Exit(0);
         }
