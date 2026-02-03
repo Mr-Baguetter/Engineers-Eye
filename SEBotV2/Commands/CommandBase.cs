@@ -1,6 +1,9 @@
-﻿using Discord;
-using Discord.Commands;
+﻿using System.Reflection;
 using SEBotV2.API.Helpers;
+using Discord;
+using Discord.Commands;
+using Discord.WebSocket;
+using static SEBotV2.Commands.Choice;
 
 namespace SEBotV2.Commands
 {
@@ -26,6 +29,10 @@ namespace SEBotV2.Commands
         /// </summary>
         public virtual int RequiredArgsCount => 0;
 
+        public virtual List<Option> Options => [];
+
+        public virtual List<Choice> Choices => [];
+
         /// <summary>
         /// Gets the required permission (<see cref="GuildPermission"/>) for the command
         /// </summary>
@@ -35,89 +42,30 @@ namespace SEBotV2.Commands
         /// Gets the <see cref="Discord.Commands.ContextType"/> for the command
         /// </summary>
         public virtual ContextType ContextType => ContextType.Guild;
-        
+
         /// <summary>
         /// Whether this command should automatically defer its response (for long-running operations)
         /// </summary>
         public virtual bool ShouldDefer => false;
-        
+
         /// <summary>
         /// Whether the deferred response should be ephemeral
         /// </summary>
         public virtual bool DeferEphemeral => false;
 
-        /// <summary>
-        /// Subcommands registered under this command. Key is the subcommand name (lowercase).
-        /// </summary>
-        public Dictionary<string, CommandBase> Subcommands { get; } = new();
+        public virtual bool AllowMentions => false;
 
-        /// <summary>
-        /// The parent command if this is a subcommand, null otherwise.
-        /// </summary>
-        public CommandBase? Parent { get; private set; }
+        public virtual bool OnlyAllowInThaumiel => false;
 
-        /// <summary>
-        /// The subcommand group name if this subcommand belongs to a group, null otherwise.
-        /// </summary>
-        public virtual string? SubcommandGroup => null;
-
-        /// <summary>
-        /// Register a subcommand under this command
-        /// </summary>
-        /// <param name="subcommand">The subcommand to register</param>
-        public void RegisterSubcommand(CommandBase subcommand)
+        public virtual Response Execute(List<string> arguments, ICommandSender sender, Dictionary<string, string> optionValues)
         {
-            string key = subcommand.Name.ToLowerInvariant();
-            
-            if (Subcommands.ContainsKey(key))
-            {
-                LogManager.Warn($"Subcommand '{key}' is already registered under '{Name}'. Overwriting.");
-            }
-            
-            subcommand.Parent = this;
-            Subcommands[key] = subcommand;
-            LogManager.Debug($"Registered subcommand '{subcommand.Name}' under '{Name}'");
+            return Response.Failed("Command not implemented.");
         }
 
-        /// <summary>
-        /// Register multiple subcommands at once
-        /// </summary>
-        public void RegisterSubcommands(params CommandBase[] subcommands)
+        public virtual async Task<Response> ExecuteAsync(List<string> arguments, ICommandSender sender, Dictionary<string, string> optionValues, CancellationToken ct = default)
         {
-            foreach (CommandBase subcommand in subcommands)
-            {
-                RegisterSubcommand(subcommand);
-            }
-        }
-
-        /// <summary>
-        /// Get a subcommand by name (case-insensitive)
-        /// </summary>
-        public CommandBase? GetSubcommand(string name) =>
-            Subcommands.TryGetValue(name.ToLowerInvariant(), out CommandBase? subcommand) ? subcommand : null;
-
-        /// <summary>
-        /// Check if this command has subcommands
-        /// </summary>
-        public bool HasSubcommands => Subcommands.Count > 0;
-
-        /// <summary>
-        /// Check if this command is a subcommand
-        /// </summary>
-        public bool IsSubcommand => Parent != null;
-
-        public virtual bool Execute(List<string> arguments, ICommandSender sender, out string response, out Embed embed, out MessageComponent componentv2)
-        {
-            response = null!;
-            embed = null!;
-            componentv2 = null!;
-            return false;
-        }
-        
-        public virtual Task<CommandResult> ExecuteAsync(List<string> arguments, ICommandSender sender, CancellationToken ct = default)
-        {
-            bool success = Execute(arguments, sender, out string response, out Embed embed, out MessageComponent componentv2);
-            return Task.FromResult(CommandResult.From(success, response, embed, componentv2));
+            await Task.Yield();
+            return Response.Failed("Command not implemented.");
         }
         
         /// <summary>
@@ -130,23 +78,114 @@ namespace SEBotV2.Commands
                 await sender.DeferAsync(ephemeral);
             }
         }
-    }
 
-    public sealed class CommandResult
-    {
-        public bool Success { get; }
-        public string Response { get; }
-        public Embed? Embed { get; }
-        public MessageComponent? Component { get; }
-
-        public CommandResult(bool success, string response, Embed? embed = null, MessageComponent? component = null)
+        public async Task<SocketGuildUser?> ResolveMentionedUserAsync(ICommandSender sender, List<string> arguments, int userarg)
         {
-            Success = success;
-            Response = response ?? string.Empty;
-            Embed = embed;
-            Component = component;
+            if (arguments?.Count > 0)
+            {
+                string userMention = arguments[userarg];
+                return sender.GuildUser.Guild.Users.FirstOrDefault(u => string.Equals(u.Username, userMention, StringComparison.OrdinalIgnoreCase));
+            }
+
+            return null;
         }
 
-        public static CommandResult From(bool success, string response, Embed? embed = null, MessageComponent? component = null) => new(success, response, embed, component);
+        public virtual bool IsAsyncImplementation()
+        {
+            MethodInfo? method = GetType().GetMethod(nameof(ExecuteAsync));
+            return method?.DeclaringType != typeof(CommandBase);
+        }
+
+        public static Dictionary<uint, Choices> ParseEnumToChoices(Type enumType)
+        {
+            if (!enumType.IsEnum)
+            {
+                LogManager.Error($"Type {enumType.Name} is not an enum");
+                throw new ArgumentException("Type provided must be an Enum.", nameof(enumType));
+            }
+
+            Dictionary<uint, Choices> result = [];
+
+            Array enumValues = Enum.GetValues(enumType);
+            string[] enumNames = Enum.GetNames(enumType);
+
+            for (uint i = 0; i < enumValues.Length; i++)
+            {
+                result[i] = new Choices
+                {
+                    Name = enumNames[i],
+                    Response = enumValues.GetValue(i)?.ToString() ?? "NULL"
+                };
+            }
+
+            return result;
+        }
+    }
+
+    public sealed class Response
+    {
+        public bool Success { get; }
+        public string? Content { get; }
+        public MessageComponent? Components { get; }
+
+        private Response(bool success, string? content, MessageComponent? components)
+        {
+            Success = success;
+            Content = content;
+            Components = components;
+        }
+
+        public static Response Succeed(string content)
+            => new(true, content, null);
+
+        public static Response Succeed(MessageComponent components)
+            => new(true, string.Empty, components);
+
+        public static Response Succeed(string content, MessageComponent components)
+            => new(true, content, components);
+
+        public static Response Failed(string content)
+            => new(false, content, null);
+
+        public static Response Failed(MessageComponent components)
+            => new(false, string.Empty, components);
+
+        public static Response Failed(string content, MessageComponent components)
+            => new(false, content, components);
+    }
+
+    public sealed class Option
+    {
+        public string Name { get; set; } = string.Empty;
+        public string Description { get; set; } = string.Empty;
+        public bool Required { get; set; }
+        public ApplicationCommandOptionType Type { get; set; }
+        public string Response { get; set; } = string.Empty;
+
+        public override string ToString()
+        {
+            return $"{Name}";
+        }
+    }
+
+    public sealed class Choice
+    {
+        public class Choices
+        {
+            public string Name { get; set; } = string.Empty;
+            public string Response { get; set; } = string.Empty;
+        }
+
+        public string Name { get; set; } = string.Empty;
+        public string Description { get; set; } = string.Empty;
+        public bool Required { get; set; }
+        public ApplicationCommandOptionType Type { get; set; }
+
+        public Dictionary<uint, Choices> Values = [];
+
+        public override string ToString()
+        {
+            return $"{Name}";
+        }
     }
 }

@@ -14,7 +14,7 @@ namespace SEBotV2.Commands.User
         public override GuildPermission RequiredPermission => GuildPermission.SendMessages;
         public override bool ShouldDefer => true;
 
-        public override async Task<CommandResult> ExecuteAsync(List<string> arguments, ICommandSender sender, CancellationToken ct = default)
+        public override async Task<Response> ExecuteAsync(List<string> arguments, ICommandSender sender, Dictionary<string, string> optionValues, CancellationToken ct = default)
         {
             ServerInfo? serverInfo = await QueryServer(sender.GuildUser.Guild.Id);
             ContainerBuilder container = new();
@@ -25,7 +25,7 @@ namespace SEBotV2.Commands.User
                 container.AddComponent(new TextDisplayBuilder("Failed to get server info. Failed to query!"));
                 container.AccentColor = Color.Red;
 
-                return CommandResult.From(false, string.Empty, component: new ComponentBuilderV2(container).Build());
+                return Response.Failed(new ComponentBuilderV2(container).Build());
             }
 
             List<string> playerLines = [];
@@ -40,7 +40,7 @@ namespace SEBotV2.Commands.User
             container.AddComponent(new TextDisplayBuilder($"-# {ServerInfoByGuildId[sender.GuildUser.Guild.Id].Name}"));
             container.AccentColor = Color.Green;
 
-            return CommandResult.From(true, string.Empty, component: new ComponentBuilderV2(container).Build());
+            return Response.Succeed(new ComponentBuilderV2(container).Build());
         }
     }
 }

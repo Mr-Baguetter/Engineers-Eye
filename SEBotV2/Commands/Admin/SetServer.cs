@@ -12,13 +12,30 @@ namespace SEBotV2.Commands.Admin
         public override bool DeferEphemeral => true;
         public override GuildPermission RequiredPermission => GuildPermission.ManageMessages;
         public override bool ShouldDefer => true;
-        public override int RequiredArgsCount => 2;
-        public override string VisibleArgs => "ServerIP, ServerPort";
+        public override List<Option> Options => 
+        [
+            new Option
+            {
+                Name = "IP",
+                Description = "The Ip address of the server",
+                Required = true,
+                Type = ApplicationCommandOptionType.String
+            },
+            new Option
+            {
+                Name = "Port",
+                Description = "The port of the server",
+                Required = true,
+                Type = ApplicationCommandOptionType.Integer
+            },
+        ];
 
-        public override async Task<CommandResult> ExecuteAsync(List<string> arguments, ICommandSender sender, CancellationToken ct = default)
+        public override async Task<Response> ExecuteAsync(List<string> arguments, ICommandSender sender, Dictionary<string, string> optionValues, CancellationToken ct = default)
         {
-            string ip = arguments[0];
-            int port = int.Parse(arguments[1]);
+            if (!optionValues.TryGetValue("ip", out var ip) || !optionValues.TryGetValue("port", out var portval))
+                return Response.Failed("Failed to get Ip or Port values");
+
+            int port = int.Parse(portval);
 
             Bot.ServerPingInfo info = new()
             {
@@ -34,7 +51,7 @@ namespace SEBotV2.Commands.Admin
             container.AddComponent(new TextDisplayBuilder($"Set Server IP for {sender.GuildUser.Guild.Id} to {ip}"));
             container.AddComponent(new TextDisplayBuilder($"Set Server Port for {sender.GuildUser.Guild.Id} to {port}"));
 
-            return CommandResult.From(true, string.Empty, component: new ComponentBuilderV2(container).Build());
+            return Response.Succeed(new ComponentBuilderV2(container).Build());
         }
     }
 }

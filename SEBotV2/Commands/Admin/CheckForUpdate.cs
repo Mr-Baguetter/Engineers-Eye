@@ -11,29 +11,40 @@ namespace SEBotV2.Commands.Admin
         public override string Description => "Checks for updates to the Bot";
         public override GuildPermission RequiredPermission => GuildPermission.ManageMessages;
         public override bool ShouldDefer => true;
-        public override int RequiredArgsCount => 1;
-        public override string VisibleArgs => "%boolean%AllowPrereleases";
+        public override List<Option> Options => 
+        [
+            new Option
+            {
+                Name = "AllowPrereleases",
+                Description = "Allow the downloading of prereleases",
+                Required = true,
+                Type = ApplicationCommandOptionType.Boolean
+            }
+        ];
 
-        public override async Task<CommandResult> ExecuteAsync(List<string> arguments, ICommandSender sender, CancellationToken ct = default)
+        public override async Task<Response> ExecuteAsync(List<string> arguments, ICommandSender sender, Dictionary<string, string> optionValues, CancellationToken ct = default)
         {
+            if (!optionValues.TryGetValue("allowprereleases", out var boolval))
+                return Response.Failed("Failed to get AllowPrereleases value");
+
             ContainerBuilder container = new();
             container.AddComponent(new TextDisplayBuilder($"## Updater"));
-            if (!bool.TryParse(arguments[0], out bool allowPreReleases))
+            if (!bool.TryParse(boolval, out bool allowPreReleases))
             {
                 container.AddComponent(new TextDisplayBuilder($"### Invalid boolean value. Use true or false."));
-                return CommandResult.From(false, string.Empty, component: new ComponentBuilderV2(container).Build());
+                return Response.Failed(new ComponentBuilderV2(container).Build());
             }
 
             (Version, string) update = await UpdateManager.CheckForUpdate(Bot.Instance.version, allowPreReleases);
             if (update.Item1 is not null)
             {
                 container.AddComponent(new TextDisplayBuilder($"### {update} Update available. \n Run `Update` from the console to update the bot"));
-                return CommandResult.From(true, string.Empty, component: new ComponentBuilderV2(container).Build());
+                return Response.Succeed(new ComponentBuilderV2(container).Build());
             }
             else
             {
                 container.AddComponent(new TextDisplayBuilder($"### {update.Item2}"));
-                return CommandResult.From(true, string.Empty, component: new ComponentBuilderV2(container).Build());
+                return Response.Succeed(new ComponentBuilderV2(container).Build());
             }
         }
     }

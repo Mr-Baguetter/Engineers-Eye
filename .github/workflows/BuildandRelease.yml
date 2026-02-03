@@ -1,0 +1,112 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build (optional, fast check)
+        run: dotnet build --configuration Release --no-restore
+
+      # Publish for Windows x64
+      - name: Publish win-x64 (single-file, self-contained)
+        run: |
+          dotnet publish -c Release -r win-x64 \
+            --no-restore \
+            --self-contained true \
+            -p:PublishSingleFile=true \
+            -p:IncludeNativeLibrariesForSelfExtract=true \
+            -o $GITHUB_WORKSPACE/publish/win-x64
+
+      # Publish for Linux x64
+      - name: Publish linux-x64 (single-file, self-contained)
+        run: |
+          dotnet publish -c Release -r linux-x64 \
+            --no-restore \
+            --self-contained true \
+            -p:PublishSingleFile=true \
+            -p:IncludeNativeLibrariesForSelfExtract=true \
+            -o $GITHUB_WORKSPACE/publish/linux-x64
+
+      # Publish for Linux ARM64
+      - name: Publish linux-arm64 (single-file, self-contained)
+        run: |
+          dotnet publish -c Release -r linux-arm64 \
+            --no-restore \
+            --self-contained true \
+            -p:PublishSingleFile=true \
+            -p:IncludeNativeLibrariesForSelfExtract=true \
+            -o $GITHUB_WORKSPACE/publish/linux-arm64
+
+      - name: Inspect publish outputs
+        run: |
+          echo "win-x64 files:"
+          ls -la $GITHUB_WORKSPACE/publish/win-x64 || true
+          echo "linux-x64 files:"
+          ls -la $GITHUB_WORKSPACE/publish/linux-x64 || true
+          echo "linux-arm64 files:"
+          ls -la $GITHUB_WORKSPACE/publish/linux-arm64 || true
+
+      - name: Package publish outputs (zip)
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/artifacts
+          cd $GITHUB_WORKSPACE/publish/win-x64
+          zip -r $GITHUB_WORKSPACE/SEBotV2-win-x64.zip . || true
+          cd $GITHUB_WORKSPACE/publish/linux-x64
+          # ensure files are executable
+          chmod +x * || true
+          zip -r $GITHUB_WORKSPACE/SEBotV2-linux-x64.zip . || true
+          cd $GITHUB_WORKSPACE/publish/linux-arm64
+          chmod +x * || true
+          zip -r $GITHUB_WORKSPACE/SEBotV2-linux-arm64.zip . || true
+          ls -la $GITHUB_WORKSPACE/*.zip
+
+      - name: Create release tag
+        id: create_tag
+        run: |
+          TAG="v1.0.${{ github.run_number }}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.create_tag.outputs.tag }}
+          name: Release ${{ steps.create_tag.outputs.tag }}
+          body: |
+            Automated release from commit ${{ github.sha }}
+
+            ## Changes
+            ${{ github.event.head_commit.message }}
+
+            ## Files
+            - `SEBotV2-win-x64.zip` - Windows x64 (EXE)
+            - `SEBotV2-linux-x64.zip` - Linux x64 (ELF, chmod +x)
+            - `SEBotV2-linux-arm64.zip` - Linux ARM64 (ELF, chmod +x)
+        files: |
+          SEBotV2-win-x64.zip
+          SEBotV2-linux-x64.zip
+          SEBotV2-linux-arm64.zip
+        draft: false
+        prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -12,11 +12,11 @@ namespace SEBotV2.Commands.User
         public override GuildPermission RequiredPermission => GuildPermission.SendMessages;
         public override bool ShouldDefer => true;
 
-        public override async Task<CommandResult> ExecuteAsync(List<string> arguments, ICommandSender sender, CancellationToken ct = default)
+        public override async Task<Response> ExecuteAsync(List<string> arguments, ICommandSender sender, Dictionary<string, string> optionValues, CancellationToken ct = default)
         {
             ContainerBuilder container = new();
             container.AddComponent(new TextDisplayBuilder(TranslationManager.Get("Wiki Message").Replace("{WikiUrl}", "https://spaceengineers.wiki.gg/")));
-            return CommandResult.From(true, string.Empty, component: new ComponentBuilderV2(container).Build());
+            return Response.Succeed(new ComponentBuilderV2(container).Build());
         }
     }
 }

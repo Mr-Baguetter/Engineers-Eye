@@ -108,6 +108,8 @@ namespace SEBotV2.API.Helpers
                 { "Player Leave Notification Start", "Monitoring {ServerName} for player leaves. \n Run this command again in the same Guild to stop" },
                 { "Player List Current", "## Current Players\n### Player Count: {PlayerCount}/{MaxPlayers}" },
                 { "Wiki Message", "## Wiki\n### {WikiUrl}" },
+                { "Batch Join Message", "{Count} players joined: \n {PlayerNames}"},
+                { "Batch Leave Message", "{Count} players left: \n {PlayerNames}"}
             };
 
             SaveTranslations(exampleTranslations);

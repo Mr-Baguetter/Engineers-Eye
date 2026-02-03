@@ -31,6 +31,8 @@ namespace SEBotV2
 
         public static event Action<ServerInfo, ServerInfo, Player>? OnPlayerJoined;
         public static event Action<ServerInfo, ServerInfo, Player>? OnPlayerLeft;
+        public static event Action<ServerInfo, ServerInfo, List<Player>>? OnPlayerJoinedBatch;
+        public static event Action<ServerInfo, ServerInfo, List<Player>>? OnPlayerLeftBatch;
 
         public DiscordShardedClient _client;
         public HttpClient _httpClient;
@@ -90,7 +92,7 @@ namespace SEBotV2
 
                 Console.CancelKeyPress += OnCancelKeyPress;
                 LogManager.Info("Bot is running. Press Ctrl+C to stop.");
-                CommandHandler.GetAndAddAllCommands();
+                CommandHandler.RegisterAllCommands();
                 await TextCommandHandler.Register();
                 TextCommandHandler.RegisterAllCommands();
                 await PlayerManager.Register();
@@ -167,7 +169,7 @@ namespace SEBotV2
             Dictionary<ulong, ServerPingInfo> pingInfo = await ConfigManager.LoadAsync<Dictionary<ulong, ServerPingInfo>>("PingInfo") ?? [];
             foreach (ulong id in pingInfo.Keys.ToArray())
             {
-                ServerInfo old = ServerManager.ServerInfoByGuildId.ContainsKey(id) ? ServerManager.ServerInfoByGuildId[id] : null;
+                ServerInfo? old = ServerInfoByGuildId.ContainsKey(id) ? ServerManager.ServerInfoByGuildId[id] : null;
                 ServerInfo info = await ServerManager.QueryServer(id) ?? new();
                 old ??= new();
 
@@ -179,34 +181,70 @@ namespace SEBotV2
                 foreach (Player player in old.Players)
                     oldPlayerNames.Add(player.Name);
 
-                if (old != null && !oldPlayerNames.SequenceEqual(playerNames))
+                HashSet<string> oldSet = new(old.Players.Select(p => p.Name));
+                HashSet<string> newSet = new(info.Players.Select(p => p.Name));
+
+                bool playersChanged = !oldSet.SetEquals(newSet);
+
+                if (playersChanged)
                 {
                     LogManager.Info($"Server {info.Name} player list changed!");
+                    
                     List<Player> newPlayers = info.Players.Where(p => old.Players.All(op => op.Name != p.Name)).ToList();
-                    foreach (Player player in newPlayers)
+                    List<Player> validNewPlayers = newPlayers.Where(p => !string.IsNullOrWhiteSpace(p.Name) && p.Name.Trim().Length != 0).ToList();
+                    
+                    List<Player> leftPlayers = old.Players.Where(op => info.Players.All(p => p.Name != op.Name)).ToList();
+                    List<Player> validLeftPlayers = leftPlayers.Where(p => !string.IsNullOrWhiteSpace(p.Name) && p.Name.Trim().Length != 0).ToList();
+
+                    if (newPlayers.Count == 0 && leftPlayers.Count == 0)
                     {
-                        if (!string.IsNullOrWhiteSpace(player.Name) && player.Name.Trim().Length != 0 && player.Name != "")
+                        ServerManager.ServerInfoByGuildId[id] = info;
+                        return;
+                    }
+
+                    int unknownJoins = newPlayers.Count - validNewPlayers.Count;
+                    int unknownLeaves = leftPlayers.Count - validLeftPlayers.Count;
+
+                    const int batchThreshold = 3;
+                    if (validNewPlayers.Count >= batchThreshold)
+                    {
+                        string joinedNames = string.Join(", ", validNewPlayers.Select(p => p.Name));
+                        Logging.LogToFile($"{validNewPlayers.Count} players joined: {joinedNames}");
+                        LogManager.Info($"{validNewPlayers.Count} players joined: {joinedNames}");
+                        OnPlayerJoinedBatch?.Invoke(old, info, validNewPlayers);
+                    }
+                    else
+                    {
+                        foreach (Player player in validNewPlayers)
                         {
                             Logging.LogToFile($"New player joined: {player.Name}");
                             LogManager.Info($"New player joined: {player.Name}");
                             OnPlayerJoined?.Invoke(old, info, player);
                         }
-                        else
-                            LogManager.Debug($"Unknown player left the server");
                     }
 
-                    List<Player> leftPlayers = old.Players.Where(op => info.Players.All(p => p.Name != op.Name)).ToList();
-                    foreach (Player player in leftPlayers)
+                    if (unknownJoins > 0)
+                        LogManager.Debug($"{unknownJoins} unknown player(s) joined the server");
+
+                    if (validLeftPlayers.Count >= batchThreshold)
                     {
-                        if (!string.IsNullOrWhiteSpace(player.Name) && player.Name.Trim().Length != 0 && player.Name != "")
+                        string leftNames = string.Join(", ", validLeftPlayers.Select(p => p.Name));
+                        Logging.LogToFile($"{validLeftPlayers.Count} players left: {leftNames}");
+                        LogManager.Info($"{validLeftPlayers.Count} players left: {leftNames}");
+                        OnPlayerLeftBatch?.Invoke(old, info, validLeftPlayers);
+                    }
+                    else
+                    {
+                        foreach (Player player in validLeftPlayers)
                         {
                             Logging.LogToFile($"Player left: {player.Name}");
                             LogManager.Info($"Player left: {player.Name}");
                             OnPlayerLeft?.Invoke(old, info, player);
                         }
-                        else
-                            LogManager.Debug($"Unknown player left the server");
                     }
+
+                    if (unknownLeaves > 0)
+                        LogManager.Debug($"{unknownLeaves} unknown player(s) left the server");
                 }
 
                 ServerManager.ServerInfoByGuildId[id] = info;
@@ -251,10 +289,9 @@ namespace SEBotV2
             ConsoleCommandHandler = new();
             ConsoleCommandHandler.Start();
             foreach (SocketGuild guild in _client.Guilds.ToArray())
-            {
                 LogManager.Debug($"{guild.Name}");
-                await CommandHandler.RegisterCommandsWithDiscordAsync(guild.Id);
-            }
+
+            await CommandHandler.RegisterCommandsWithDiscordAsync();
 
             await UpdateBotStatusAsync();
             StartStatusLoop();
@@ -355,7 +392,7 @@ namespace SEBotV2
             {
                 Dictionary<ulong, ServerPingInfo> kvp = await ConfigManager.LoadAsync<Dictionary<ulong, ServerPingInfo>>("PingInfo") ?? [];
                 ulong id = kvp?.Keys.FirstOrDefault() ?? 123456789012345678;
-                ServerInfo serverInfo = await ServerManager.QueryServer(id);
+                ServerInfo? serverInfo = await ServerManager.QueryServer(id);
 
                 string statusText;
                 ActivityType activityType = ActivityType.Watching;
